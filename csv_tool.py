@@ -18,14 +18,28 @@ from __future__ import annotations
 
 import csv
 import os
+import sys
+import webbrowser
 import tkinter as tk
 from pathlib import Path
 from tkinter import font as tkfont
 from tkinter import messagebox, simpledialog, ttk
 
-APP_DIR = Path(__file__).resolve().parent
+# When running as a PyInstaller-built .exe, sys.frozen is True and the
+# executable lives outside the extracted temp dir. We want the input/output
+# folders to sit next to the .exe (or the .py during development), while
+# read-only bundled assets (like README.md) are resolved via sys._MEIPASS.
+if getattr(sys, "frozen", False):
+    APP_DIR = Path(sys.executable).resolve().parent
+    RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
+else:
+    APP_DIR = Path(__file__).resolve().parent
+    RESOURCE_DIR = APP_DIR
+
 INPUT_DIR = APP_DIR / "input"
 OUTPUT_DIR = APP_DIR / "output"
+
+PROTOLAB_URL = "https://protolab.tech"
 
 # -------- Dark theme palette --------
 BG_BASE = "#1b1d2a"       # main window background
@@ -167,6 +181,18 @@ class CSVTool:
         )
         self.save_btn.pack(side="right", padx=2)
 
+        ttk.Button(toolbar, text="Info", command=self.show_info).pack(
+            side="right", padx=2
+        )
+
+        self.confirm_destructive_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            toolbar,
+            text="Confirm destructive",
+            variable=self.confirm_destructive_var,
+            style="Toolbar.TCheckbutton",
+        ).pack(side="right", padx=(0, 8))
+
         info = ttk.Frame(self.root, padding=(10, 2))
         info.pack(side="top", fill="x")
         self.info_label = ttk.Label(info, text="No file loaded", foreground=FG_MUTED)
@@ -183,6 +209,37 @@ class CSVTool:
             text=self._default_hint_text(),
         )
         self.hint_label.pack(side="top", fill="x")
+
+        # Footer with protolab.tech link. Packed before the main pane so the
+        # bottom strip is reserved and the grid fills the remaining space.
+        footer = tk.Frame(self.root, bg=BG_ELEV, height=26)
+        footer.pack(side="bottom", fill="x")
+        footer.pack_propagate(False)
+        link_font = tkfont.Font(family="Segoe UI", size=9, underline=True)
+        self.protolab_link = tk.Label(
+            footer,
+            text="protolab.tech",
+            bg=BG_ELEV,
+            fg=ACCENT,
+            cursor="hand2",
+            font=link_font,
+            padx=10,
+        )
+        self.protolab_link.pack(side="left", pady=2)
+        self.protolab_link.bind("<Button-1>", lambda _e: self._open_protolab())
+        self.protolab_link.bind(
+            "<Enter>", lambda _e: self.protolab_link.configure(fg=ACCENT_ACTIVE)
+        )
+        self.protolab_link.bind(
+            "<Leave>", lambda _e: self.protolab_link.configure(fg=ACCENT)
+        )
+        tk.Label(
+            footer,
+            text="  CSV Tools  •  standard-library only",
+            bg=BG_ELEV,
+            fg=FG_MUTED,
+            font=("Segoe UI", 9),
+        ).pack(side="left", pady=2)
 
         main = ttk.Panedwindow(self.root, orient="horizontal")
         main.pack(fill="both", expand=True, padx=6, pady=(4, 6))
@@ -353,6 +410,7 @@ class CSVTool:
         self.root.bind("<Control-z>", lambda _e: self.undo())
         self.root.bind("<Control-Z>", lambda _e: self.undo())
         self.root.bind("<Escape>", lambda _e: self.clear_selection())
+        self.root.bind("<F1>", lambda _e: self.show_info())
 
     # ------------------------------------------------------------------ theme
     def _apply_dark_theme(self) -> None:
@@ -590,16 +648,165 @@ class CSVTool:
         self.load_csv(INPUT_DIR / name)
 
     def _open_input_folder(self) -> None:
+        self._open_folder(INPUT_DIR)
+
+    def _open_output_folder(self) -> None:
+        self._open_folder(OUTPUT_DIR)
+
+    def _open_folder(self, folder: Path) -> None:
+        """Open a folder in the OS file explorer on Windows/macOS/Linux."""
+        folder.mkdir(exist_ok=True)
         try:
-            os.startfile(str(INPUT_DIR))  # type: ignore[attr-defined]
+            if sys.platform.startswith("win"):
+                os.startfile(str(folder))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                os.system(f'open "{folder}"')
+            else:
+                os.system(f'xdg-open "{folder}"')
         except Exception as e:
             messagebox.showerror("Open folder", str(e))
 
-    def _open_output_folder(self) -> None:
+    def _open_protolab(self) -> None:
         try:
-            os.startfile(str(OUTPUT_DIR))  # type: ignore[attr-defined]
+            webbrowser.open(PROTOLAB_URL)
         except Exception as e:
-            messagebox.showerror("Open folder", str(e))
+            messagebox.showerror("Open link", str(e))
+
+    # --------------------------------------------------------- confirm helper
+    def _confirm(self, title: str, question: str) -> bool:
+        """Ask the user before a destructive action. Returns True to proceed.
+
+        When the "Confirm destructive" toolbar toggle is off, the action runs
+        immediately. This keeps power-users unblocked while defaulting to safe.
+        """
+        if not getattr(self, "confirm_destructive_var", None) or not self.confirm_destructive_var.get():
+            return True
+        return bool(messagebox.askyesno(title, question, parent=self.root))
+
+    # --------------------------------------------------------- Info window
+    def show_info(self) -> None:
+        readme = RESOURCE_DIR / "README.md"
+        try:
+            content = readme.read_text(encoding="utf-8")
+        except Exception as e:
+            content = (
+                "README.md could not be loaded.\n\n"
+                f"Looked in: {readme}\n\nError: {e}"
+            )
+
+        win = tk.Toplevel(self.root)
+        win.title("CSV Tools — Info")
+        win.configure(bg=BG_BASE)
+        win.geometry("820x640")
+        win.minsize(520, 360)
+        win.transient(self.root)
+
+        body = ttk.Frame(win, padding=(8, 8, 8, 0))
+        body.pack(fill="both", expand=True)
+
+        txt = tk.Text(
+            body,
+            wrap="word",
+            bg=BG_DEEP,
+            fg=FG_DEFAULT,
+            insertbackground=FG_DEFAULT,
+            selectbackground=ACCENT_BG,
+            selectforeground="#ffffff",
+            relief="flat",
+            borderwidth=0,
+            padx=14,
+            pady=12,
+            spacing1=1,
+            spacing3=2,
+        )
+        txt.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(body, orient="vertical", command=txt.yview)
+        sb.pack(side="right", fill="y")
+        txt.configure(yscrollcommand=sb.set)
+
+        self._render_markdown_into(txt, content)
+        txt.configure(state="disabled")
+
+        bar = ttk.Frame(win, padding=8)
+        bar.pack(side="bottom", fill="x")
+        link = tk.Label(
+            bar,
+            text=PROTOLAB_URL,
+            bg=BG_BASE,
+            fg=ACCENT,
+            cursor="hand2",
+            font=("Segoe UI", 9, "underline"),
+        )
+        link.pack(side="left")
+        link.bind("<Button-1>", lambda _e: self._open_protolab())
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
+
+        win.bind("<Escape>", lambda _e: win.destroy())
+
+    def _render_markdown_into(self, widget: tk.Text, content: str) -> None:
+        """Render a minimal subset of Markdown (headings, lists, code blocks,
+        inline code) into a tk.Text widget using tags. Keeps the dialog light
+        and stdlib-only while remaining readable."""
+        h1_font = tkfont.Font(family="Segoe UI", size=16, weight="bold")
+        h2_font = tkfont.Font(family="Segoe UI", size=13, weight="bold")
+        h3_font = tkfont.Font(family="Segoe UI", size=11, weight="bold")
+        code_font = tkfont.Font(family="Consolas", size=9)
+        bold_font = tkfont.Font(family="Segoe UI", size=9, weight="bold")
+
+        widget.tag_configure(
+            "h1", font=h1_font, foreground=ACCENT, spacing1=10, spacing3=6
+        )
+        widget.tag_configure(
+            "h2", font=h2_font, foreground=ACCENT, spacing1=8, spacing3=4
+        )
+        widget.tag_configure(
+            "h3", font=h3_font, foreground=FG_DEFAULT, spacing1=6, spacing3=3
+        )
+        widget.tag_configure(
+            "code", font=code_font, background=BG_ELEV, foreground=FG_DEFAULT
+        )
+        widget.tag_configure(
+            "inlinecode",
+            font=code_font,
+            background=BG_ELEV,
+            foreground=FG_DEFAULT,
+        )
+        widget.tag_configure(
+            "bullet", lmargin1=20, lmargin2=40, spacing1=1, spacing3=1
+        )
+        widget.tag_configure("bold", font=bold_font)
+        widget.tag_configure("muted", foreground=FG_MUTED)
+
+        def insert_inline(line: str, base_tags: tuple[str, ...] = ()) -> None:
+            """Split line on backticks to style inline code. Simple + safe."""
+            parts = line.split("`")
+            for i, part in enumerate(parts):
+                tags = base_tags + (("inlinecode",) if i % 2 == 1 else ())
+                widget.insert("end", part, tags)
+            widget.insert("end", "\n", base_tags)
+
+        in_code = False
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_code = not in_code
+                continue
+            if in_code:
+                widget.insert("end", line + "\n", ("code",))
+                continue
+            if line.startswith("# "):
+                widget.insert("end", line[2:] + "\n", ("h1",))
+            elif line.startswith("## "):
+                widget.insert("end", line[3:] + "\n", ("h2",))
+            elif line.startswith("### "):
+                widget.insert("end", line[4:] + "\n", ("h3",))
+            elif stripped.startswith(("- ", "* ")):
+                indent = len(line) - len(line.lstrip())
+                body_txt = stripped[2:]
+                widget.insert("end", " " * indent + "• ", ("bullet",))
+                insert_inline(body_txt, ("bullet",))
+            else:
+                insert_inline(line)
 
     # --------------------------------------------------------- CSV I/O
     def load_csv(self, path: Path) -> None:
@@ -644,6 +851,13 @@ class CSVTool:
         suffix = self.suffix_var.get().strip()
         stem = self.current_file.stem + suffix
         out_path = OUTPUT_DIR / f"{stem}{self.current_file.suffix}"
+
+        if out_path.exists() and not self._confirm(
+            "Overwrite file?",
+            f"'{out_path.name}' already exists in the output folder.\n\n"
+            "Overwrite it?",
+        ):
+            return
 
         delim = getattr(self.dialect, "delimiter", ",")
         quotechar = getattr(self.dialect, "quotechar", '"')
@@ -1290,6 +1504,14 @@ class CSVTool:
                 "Delete Column", "Cannot delete the last remaining column."
             )
             return
+        label = self.headers[col] if self.has_header_var.get() else f"Col {col + 1}"
+        if not self._confirm(
+            "Delete column?",
+            f"Delete column '{label}'?\n\n"
+            f"This removes the header and all {len(self.data)} value(s) in it.\n"
+            "You can Undo (Ctrl+Z) after the fact.",
+        ):
+            return
         self._snapshot()
         self.headers.pop(col)
         for row in self.data:
@@ -1373,6 +1595,13 @@ class CSVTool:
     def delete_row(self, row: int) -> None:
         if row < 0 or row >= len(self.data):
             return
+        if not self._confirm(
+            "Delete row?",
+            f"Delete row {row + 1}?\n\n"
+            "All values in this row will be removed.\n"
+            "You can Undo (Ctrl+Z) after the fact.",
+        ):
+            return
         self._snapshot()
         self.data.pop(row)
         self.selected.clear()
@@ -1408,6 +1637,21 @@ class CSVTool:
     # --- Has-header toggle --------------------------------------------
     def _on_has_header_toggle(self) -> None:
         if not self.headers and not self.data:
+            return
+        if self.has_header_var.get():
+            question = (
+                "The first data row will be promoted to become the header.\n\n"
+                "Continue?"
+            )
+        else:
+            question = (
+                "The current header row will be pushed down into the data "
+                "rows and generic column names (Col 1, Col 2, …) will be used.\n\n"
+                "Continue?"
+            )
+        if not self._confirm("Header toggle", question):
+            # Revert the toggle visually without firing the command again.
+            self.has_header_var.set(not self.has_header_var.get())
             return
         self._snapshot()
         if self.has_header_var.get():
