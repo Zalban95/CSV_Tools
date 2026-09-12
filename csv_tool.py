@@ -17,6 +17,7 @@ Only the Python standard library is used.
 from __future__ import annotations
 
 import csv
+import io
 import os
 import sys
 import webbrowser
@@ -94,8 +95,11 @@ class CSVTool:
         self.row_num_width = 56
         self.current_file: Path | None = None
         self.dialect: type[csv.Dialect] | csv.Dialect = csv.excel
+        self.encoding: str = "utf-8"
         self.modified = False
         self.undo_stack: list[tuple[list[str], list[list[str]], bool]] = []
+        self._suppress_file_select = False
+        self._loading_file = False
 
         self.cell_rects: dict[tuple[int, int], int] = {}
         self.cell_texts: dict[tuple[int, int], int] = {}
@@ -383,8 +387,7 @@ class CSVTool:
         self.canvas.bind("<Button-1>", self._on_canvas_click)
         self.canvas.bind("<Control-Button-1>", self._on_canvas_ctrl_click)
         self.canvas.bind("<Shift-Button-1>", self._on_canvas_shift_click)
-        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
-        self.canvas.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
+        self._bind_mousewheel(self.canvas)
 
         # Header press/motion/release drives both click-to-select and
         # drag-to-reorder. Right-click opens a context menu.
@@ -392,14 +395,13 @@ class CSVTool:
         self.header_canvas.bind("<B1-Motion>", self._header_motion)
         self.header_canvas.bind("<ButtonRelease-1>", self._header_release)
         self.header_canvas.bind("<Button-3>", self._header_right_click)
-        self.header_canvas.bind("<MouseWheel>", self._on_mousewheel)
-        self.header_canvas.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
+        self._bind_mousewheel(self.header_canvas)
 
         self.rownum_canvas.bind("<ButtonPress-1>", self._rownum_press)
         self.rownum_canvas.bind("<B1-Motion>", self._rownum_motion)
         self.rownum_canvas.bind("<ButtonRelease-1>", self._rownum_release)
         self.rownum_canvas.bind("<Button-3>", self._rownum_right_click)
-        self.rownum_canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self._bind_mousewheel(self.rownum_canvas, horizontal=False)
 
         self.corner_canvas.bind("<Button-1>", lambda _e: self.select_all())
 
@@ -620,16 +622,47 @@ class CSVTool:
         self.canvas.yview(*args)
         self.rownum_canvas.yview(*args)
 
+    def _bind_mousewheel(self, widget: tk.Misc, horizontal: bool = True) -> None:
+        """Bind Windows/macOS MouseWheel and Linux X11 Button-4/5 scroll."""
+        widget.bind("<MouseWheel>", self._on_mousewheel)
+        widget.bind("<Button-4>", self._on_mousewheel)
+        widget.bind("<Button-5>", self._on_mousewheel)
+        if horizontal:
+            widget.bind("<Shift-MouseWheel>", self._on_shift_mousewheel)
+            widget.bind("<Shift-Button-4>", self._on_shift_mousewheel)
+            widget.bind("<Shift-Button-5>", self._on_shift_mousewheel)
+
+    @staticmethod
+    def _wheel_units(event: tk.Event) -> int:
+        """Normalize wheel events across Windows, macOS, and Linux/X11."""
+        num = getattr(event, "num", None)
+        if num == 4:
+            return -1
+        if num == 5:
+            return 1
+        delta = getattr(event, "delta", 0) or 0
+        if delta == 0:
+            return 0
+        if sys.platform == "darwin":
+            return -1 if delta > 0 else 1
+        # Windows (and some X11 builds) report multiples of 120.
+        stepped = delta // 120
+        if stepped != 0:
+            return -stepped
+        return -1 if delta > 0 else 1
+
     def _on_mousewheel(self, event: tk.Event) -> str:
-        delta = -1 * (event.delta // 120)
-        self.canvas.yview_scroll(delta, "units")
-        self.rownum_canvas.yview_scroll(delta, "units")
+        units = self._wheel_units(event)
+        if units:
+            self.canvas.yview_scroll(units, "units")
+            self.rownum_canvas.yview_scroll(units, "units")
         return "break"
 
     def _on_shift_mousewheel(self, event: tk.Event) -> str:
-        delta = -1 * (event.delta // 120)
-        self.canvas.xview_scroll(delta, "units")
-        self.header_canvas.xview_scroll(delta, "units")
+        units = self._wheel_units(event)
+        if units:
+            self.canvas.xview_scroll(units, "units")
+            self.header_canvas.xview_scroll(units, "units")
         return "break"
 
     # --------------------------------------------------------- file list
@@ -641,11 +674,30 @@ class CSVTool:
                     self.file_list.insert("end", p.name)
 
     def _on_file_select(self, _event: tk.Event) -> None:
+        if self._suppress_file_select:
+            return
         sel = self.file_list.curselection()
         if not sel:
             return
         name = self.file_list.get(sel[0])
         self.load_csv(INPUT_DIR / name)
+
+    def _resync_file_list_selection(self) -> None:
+        """Keep the listbox highlight aligned with the loaded file."""
+        self._suppress_file_select = True
+        try:
+            self.file_list.selection_clear(0, "end")
+            if self.current_file is None:
+                return
+            target = self.current_file.name
+            for i in range(self.file_list.size()):
+                if self.file_list.get(i) == target:
+                    self.file_list.selection_set(i)
+                    self.file_list.activate(i)
+                    self.file_list.see(i)
+                    break
+        finally:
+            self._suppress_file_select = False
 
     def _open_input_folder(self) -> None:
         self._open_folder(INPUT_DIR)
@@ -809,39 +861,145 @@ class CSVTool:
                 insert_inline(line)
 
     # --------------------------------------------------------- CSV I/O
-    def load_csv(self, path: Path) -> None:
-        try:
-            with open(path, "r", encoding="utf-8-sig", newline="") as f:
-                sample = f.read(8192)
-                f.seek(0)
-                try:
-                    dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-                except csv.Error:
-                    dialect = csv.excel
-                rows = list(csv.reader(f, dialect))
-        except Exception as e:
-            messagebox.showerror("Open CSV", f"Failed to open:\n{e}")
-            return
+    @staticmethod
+    def _detect_encoding(raw: bytes) -> str:
+        """Detect a reasonable text encoding, preferring BOM then UTF-8."""
+        if raw.startswith(b"\xef\xbb\xbf"):
+            return "utf-8-sig"
+        if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+            return "utf-16"
+        # UTF-16 without BOM often has many NUL bytes in ASCII-heavy CSVs.
+        if len(raw) >= 4 and raw[1::2] == b"\x00" * (len(raw) // 2):
+            try:
+                raw.decode("utf-16-le")
+                return "utf-16-le"
+            except UnicodeDecodeError:
+                pass
+        if len(raw) >= 4 and raw[0::2] == b"\x00" * (len(raw) // 2):
+            try:
+                raw.decode("utf-16-be")
+                return "utf-16-be"
+            except UnicodeDecodeError:
+                pass
+        for enc in ("utf-8", "cp1252", "latin-1"):
+            try:
+                raw.decode(enc)
+                return enc
+            except UnicodeDecodeError:
+                continue
+        return "latin-1"
 
-        if not rows:
-            messagebox.showwarning("Empty file", "The selected file is empty.")
-            return
-
-        if self.has_header_var.get():
-            self.headers = list(rows[0])
-            self.data = [list(r) for r in rows[1:]]
-        else:
-            ncols = max((len(r) for r in rows), default=0)
-            self.headers = [f"Col {i + 1}" for i in range(ncols)]
-            self.data = [list(r) for r in rows]
-        self.dialect = dialect
-        self.current_file = path
+    def _clear_sheet(self) -> None:
+        """Reset in-memory sheet state (used for empty / failed loads)."""
+        self.headers = []
+        self.data = []
+        self.col_widths = []
+        self.col_x = [0]
         self.selected.clear()
         self.undo_stack.clear()
         self.modified = False
-        self._compute_column_widths()
+        self.current_file = None
+        self.encoding = "utf-8"
+        self.dialect = csv.excel
         self._redraw_all()
         self._update_info()
+
+    def load_csv(self, path: Path) -> None:
+        # Discard-guard when switching away from a dirty sheet.
+        if (
+            self.modified
+            and self.current_file is not None
+            and path.resolve() != self.current_file.resolve()
+        ):
+            if not self._confirm(
+                "Unsaved changes",
+                "You have unsaved changes that will be lost if you switch "
+                "files.\n\nDiscard changes and open the new file?",
+            ):
+                self._resync_file_list_selection()
+                return
+
+        try:
+            raw = path.read_bytes()
+        except Exception as e:
+            messagebox.showerror("Open CSV", f"Failed to open:\n{e}")
+            self._resync_file_list_selection()
+            return
+
+        if not raw.strip():
+            messagebox.showwarning("Empty file", "The selected file is empty.")
+            self._clear_sheet()
+            return
+
+        encoding = self._detect_encoding(raw)
+        try:
+            text = raw.decode(encoding)
+            sample = text[:8192]
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+            except csv.Error:
+                dialect = csv.excel
+            rows = list(csv.reader(io.StringIO(text), dialect))
+        except Exception as e:
+            messagebox.showerror("Open CSV", f"Failed to open:\n{e}")
+            self._resync_file_list_selection()
+            return
+
+        # Blank-line-only files yield rows like [[], [], []] — treat as empty.
+        if not rows or all(len(r) == 0 for r in rows):
+            messagebox.showwarning("Empty file", "The selected file is empty.")
+            self._clear_sheet()
+            return
+
+        # Fresh file load always defaults to "first row is header".
+        self._loading_file = True
+        try:
+            self.has_header_var.set(True)
+            self.headers = list(rows[0])
+            self.data = [list(r) for r in rows[1:]]
+            self.dialect = dialect
+            self.encoding = encoding
+            self.current_file = path
+            self.selected.clear()
+            self.undo_stack.clear()
+            self.modified = False
+            self._compute_column_widths()
+            self._redraw_all()
+            self._update_info()
+        finally:
+            self._loading_file = False
+
+    def _safe_output_path(self, suffix: str) -> Path | None:
+        """Build an output path that cannot escape OUTPUT_DIR via the suffix."""
+        # Suffix is a name fragment only — strip any path separators / traversal.
+        safe_suffix = (
+            suffix.replace("\\", "_")
+            .replace("/", "_")
+            .replace("\0", "")
+        )
+        # Collapse leftover ".." segments that could appear after sanitization.
+        while ".." in safe_suffix:
+            safe_suffix = safe_suffix.replace("..", "_")
+        stem = f"{self.current_file.stem}{safe_suffix}"
+        # Force a single path segment (basename only).
+        out_name = Path(f"{stem}{self.current_file.suffix}").name
+        if not out_name or out_name in {".", ".."}:
+            messagebox.showerror(
+                "Save",
+                "Invalid file name suffix. Use plain text without path separators.",
+            )
+            return None
+        out_dir = OUTPUT_DIR.resolve()
+        out_path = (out_dir / out_name).resolve()
+        try:
+            out_path.relative_to(out_dir)
+        except ValueError:
+            messagebox.showerror(
+                "Save",
+                "Refusing to write outside the output folder.",
+            )
+            return None
+        return out_path
 
     def save_file(self) -> None:
         if not self.current_file:
@@ -849,8 +1007,9 @@ class CSVTool:
             return
 
         suffix = self.suffix_var.get().strip()
-        stem = self.current_file.stem + suffix
-        out_path = OUTPUT_DIR / f"{stem}{self.current_file.suffix}"
+        out_path = self._safe_output_path(suffix)
+        if out_path is None:
+            return
 
         if out_path.exists() and not self._confirm(
             "Overwrite file?",
@@ -861,9 +1020,10 @@ class CSVTool:
 
         delim = getattr(self.dialect, "delimiter", ",")
         quotechar = getattr(self.dialect, "quotechar", '"')
+        encoding = self.encoding or "utf-8"
         try:
             OUTPUT_DIR.mkdir(exist_ok=True)
-            with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
+            with open(out_path, "w", encoding=encoding, newline="") as f:
                 writer = csv.writer(
                     f,
                     delimiter=delim,
@@ -883,7 +1043,9 @@ class CSVTool:
     # --------------------------------------------------------- grid draw
     def _compute_column_widths(self) -> None:
         ncols = max(len(self.headers), max((len(r) for r in self.data), default=0))
-        self.headers = self.headers + [""] * (ncols - len(self.headers))
+        # Pad short header rows with Col N labels (never invent blank header names).
+        while len(self.headers) < ncols:
+            self.headers.append(f"Col {len(self.headers) + 1}")
         for i, r in enumerate(self.data):
             if len(r) < ncols:
                 self.data[i] = r + [""] * (ncols - len(r))
@@ -1636,6 +1798,8 @@ class CSVTool:
 
     # --- Has-header toggle --------------------------------------------
     def _on_has_header_toggle(self) -> None:
+        if self._loading_file:
+            return
         if not self.headers and not self.data:
             return
         if self.has_header_var.get():
@@ -1653,7 +1817,9 @@ class CSVTool:
             # Revert the toggle visually without firing the command again.
             self.has_header_var.set(not self.has_header_var.get())
             return
-        self._snapshot()
+        # Checkbox already flipped before this handler runs — snapshot the
+        # *previous* has_header flag so Undo restores a consistent pair.
+        self._snapshot(has_header=not self.has_header_var.get())
         if self.has_header_var.get():
             # Turning ON: promote first data row to header
             if self.data:
@@ -1704,15 +1870,16 @@ class CSVTool:
         else:
             self.data[r][c] = value
 
-    def _snapshot(self) -> None:
-        has_header = bool(
-            getattr(self, "has_header_var", None) and self.has_header_var.get()
-        )
+    def _snapshot(self, has_header: bool | None = None) -> None:
+        if has_header is None:
+            has_header = bool(
+                getattr(self, "has_header_var", None) and self.has_header_var.get()
+            )
         self.undo_stack.append(
             (
                 [h for h in self.headers],
                 [row[:] for row in self.data],
-                has_header,
+                bool(has_header),
             )
         )
         if len(self.undo_stack) > 40:
@@ -1728,7 +1895,12 @@ class CSVTool:
         self.headers = headers
         self.data = data
         if hasattr(self, "has_header_var"):
-            self.has_header_var.set(has_header)
+            # Avoid running the toggle handler while restoring undo state.
+            self._loading_file = True
+            try:
+                self.has_header_var.set(has_header)
+            finally:
+                self._loading_file = False
         self.modified = True
         self.selected.clear()
         self._compute_column_widths()
