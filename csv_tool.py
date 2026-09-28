@@ -1022,18 +1022,32 @@ class CSVTool:
         delim = getattr(self.dialect, "delimiter", ",")
         quotechar = getattr(self.dialect, "quotechar", '"')
         encoding = self.encoding or "utf-8"
+        # Serialize and encode in memory first so an encoding failure can't
+        # leave a truncated file behind (or clobber a previous good output).
+        buf = io.StringIO(newline="")
+        writer = csv.writer(
+            buf,
+            delimiter=delim,
+            quotechar=quotechar,
+            quoting=csv.QUOTE_MINIMAL,
+        )
+        if self.has_header_var.get():
+            writer.writerow(self.headers)
+        writer.writerows(self.data)
+        try:
+            payload = buf.getvalue().encode(encoding)
+        except UnicodeEncodeError:
+            if not messagebox.askyesno(
+                "Save",
+                f"Some characters can't be stored in the original encoding "
+                f"({encoding}).\n\nSave as UTF-8 instead?",
+                parent=self.root,
+            ):
+                return
+            payload = buf.getvalue().encode("utf-8-sig")
         try:
             OUTPUT_DIR.mkdir(exist_ok=True)
-            with open(out_path, "w", encoding=encoding, newline="") as f:
-                writer = csv.writer(
-                    f,
-                    delimiter=delim,
-                    quotechar=quotechar,
-                    quoting=csv.QUOTE_MINIMAL,
-                )
-                if self.has_header_var.get():
-                    writer.writerow(self.headers)
-                writer.writerows(self.data)
+            out_path.write_bytes(payload)
         except Exception as e:
             messagebox.showerror("Save", f"Failed to save:\n{e}")
             return
