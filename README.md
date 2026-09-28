@@ -70,9 +70,25 @@ To build on macOS or Linux instead:
 ./build_unix.sh
 ```
 
-Both scripts auto-install PyInstaller into the current Python environment if
-it isn't present. PyInstaller is the **only** build-time dependency — it is
-never required at runtime.
+`build_windows.bat` creates a private `.venv\` and installs PyInstaller
+there (your system Python is left untouched); `build_unix.sh` installs it into
+the current Python environment. PyInstaller is the **only** build-time
+dependency — it is never required at runtime. `.venv/`, `build/` and `dist/`
+are git-ignored.
+
+**Portable use:** copy `dist\CSV_Tools.exe` to any folder (or USB stick) on a
+Windows machine and double-click it. No Python, no install, no admin rights.
+
+### Installer (optional, Windows)
+
+If [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed
+(`winget install JRSoftware.InnoSetup`, no admin needed), `build_windows.bat`
+also produces `dist\CSV_Tools_Setup.exe` from `installer.iss`. You can also
+run `iscc installer.iss` yourself after building the `.exe`. The setup
+installs per-user (no admin prompt) into `%LOCALAPPDATA%\Programs\CSV_Tools`,
+adds Start-menu entries (app, input/output folders, uninstall) and an optional
+desktop shortcut, and registers an uninstaller in *Apps & features*.
+Uninstalling leaves your `input\`/`output\` CSVs in place.
 
 ## Folder layout
 
@@ -83,6 +99,7 @@ CSV_Tools/
 ├── CSV_Tools.spec     PyInstaller recipe
 ├── build_windows.bat  one-click Windows .exe build
 ├── build_unix.sh      macOS / Linux build
+├── installer.iss      Inno Setup script (optional Windows installer)
 ├── README.md          this file (also shown by the in-app Info button)
 ├── input/             drop your CSVs here
 └── output/            saved results land here
