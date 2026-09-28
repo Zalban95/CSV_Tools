@@ -1053,6 +1053,7 @@ class CSVTool:
             return
 
         self.modified = False
+        self._update_info()
         messagebox.showinfo("Saved", f"Saved to:\n{out_path}")
 
     # --------------------------------------------------------- grid draw
