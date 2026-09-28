@@ -906,11 +906,12 @@ class CSVTool:
 
     def load_csv(self, path: Path) -> None:
         # Discard-guard when switching away from a dirty sheet.
-        if (
-            self.modified
-            and self.current_file is not None
-            and path.resolve() != self.current_file.resolve()
-        ):
+        if self.modified and self.current_file is not None:
+            if path.resolve() == self.current_file.resolve():
+                # Re-clicking the open file must not silently reload it and
+                # throw away unsaved edits.
+                self._resync_file_list_selection()
+                return
             if not self._confirm(
                 "Unsaved changes",
                 "You have unsaved changes that will be lost if you switch "
